@@ -146,8 +146,18 @@ export default {
     },
 
     initDatabase() {
-      const db = new PouchDB("http://admin:couchdb@localhost:5984/post");
+      const db = new PouchDB("LocalDB");
       if (db) {
+        //http://localhost:5984/_utils/#login
+          const remoteDB = new PouchDB("http://admin:couchdb@localhost:5984/post");
+          if(remoteDB){
+            db.sync(remoteDB, {
+              live: true,
+              retry: true,
+            });
+          }else{
+          console.warn("Remote database not found");
+        }
         console.log("Connected to collection 'post'");
       } else {
         console.warn("Something went wrong");
