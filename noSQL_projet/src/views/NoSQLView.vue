@@ -9,6 +9,14 @@ declare interface Post {
   _rev?: string;
   post_name: string;
   post_content: string;
+  _attachments?: {
+    [key: string]: {
+      content_type: string;
+      digest: string;
+      length: number;
+      stub: boolean;
+    };
+  };
   attributes: {
     creation_date: string;
   };
@@ -17,6 +25,11 @@ declare interface Post {
 interface PostRow {
   _id: string;
   doc: Post;
+  attachments?: {
+    filename: string;
+    url: string;
+    contentType: string;
+  }[];
 }
 
 export default {
@@ -36,6 +49,7 @@ export default {
           creation_date: new Date().toISOString(),
         },
       },
+      selectedFile: null as File | null,
       editingPost: null as Post | null,
       storage: null as PouchDB.Database | null,
     };
@@ -52,42 +66,26 @@ export default {
   },
 
   methods: {
-    async fetchData() {
+    fetchData() {
       const storage = ref(this.storage);
       const self = this;
 
-      if (!storage.value) {
-        console.warn("Database not initialized.");
-        return;
-      }
-
-      try {
-        if (this.isSearchActive) {
-          console.log(
-            "Recherche active, mise à jour des résultats de recherche."
-          );
-          const result = await storage.value.find({
-            selector: {
-              post_name: { $regex: RegExp(this.searchQuery, "i") },
-            },
+      if (storage.value) {
+        storage.value
+          .allDocs({
+            include_docs: true, // Inclure les documents
+            attachments: false, // Ne pas inclure les données des pièces jointes ici
+          })
+          .then(async function (result: any) {
+            console.log("fetchData success", result);
+            self.postsData = result.rows.map((row: any) => ({
+              _id: row.id,
+              doc: row.doc,
+            }));
+          })
+          .catch(function (error: any) {
+            console.log("fetchData error", error);
           });
-
-          this.searchResults = result.docs.map((doc: any) => ({
-            ...doc,
-          }));
-        } else {
-          const result = await storage.value.allDocs({
-            include_docs: true,
-            attachments: true,
-          });
-
-          this.postsData = result.rows.map((row: any) => ({
-            _id: row.id,
-            doc: row.doc,
-          }));
-        }
-      } catch (error) {
-        console.error("fetchData error:", error);
       }
     },
 
@@ -248,7 +246,65 @@ export default {
       this.searchQuery = "";
       this.isSearchActive = false;
     },
-    
+
+    async addAttachment(postId: string, file: File) {
+      const db = ref(this.storage).value;
+      if (!db) {
+        console.error("Database not initialized");
+        return;
+      }
+
+      try {
+        const doc = await db.get(postId); // Get current document
+        await db.putAttachment(postId, file.name, doc._rev, file, file.type);
+        console.log("Attachment added successfully");
+        await this.fetchData(); // Reload all data
+      } catch (error) {
+        console.error("Error adding attachment:", error);
+      }
+    },
+    handleFileUpload(event: Event) {
+      const target = event.target as HTMLInputElement;
+      if (target.files && target.files.length > 0) {
+        this.selectedFile = target.files[0];
+      }
+    },
+
+    async addAttachmentToPost(postId: string) {
+      if (!this.selectedFile) {
+        alert("Veuillez sélectionner un fichier.");
+        return;
+      }
+      await this.addAttachment(postId, this.selectedFile);
+      this.selectedFile = null; // Réinitialiser après l'ajout
+    },
+    async fetchAttachments(postId: string) {
+      const db = ref(this.storage).value;
+      if (!db) return [];
+
+      try {
+        // Get the document with attachments
+        const doc = await db.get(postId, { attachments: true });
+        if (!doc._attachments) return [];
+
+        // Convert each attachment to a downloadable format
+        return await Promise.all(
+          Object.entries(doc._attachments).map(
+            async ([filename, attachment]) => {
+              const blob = await db.getAttachment(postId, filename);
+              return {
+                filename,
+                url: URL.createObjectURL(blob), // Create downloadable URL
+                contentType: attachment.content_type,
+              };
+            }
+          )
+        );
+      } catch (error) {
+        console.error("Error fetching attachments:", error);
+        return [];
+      }
+    },
     async initDatabase() {
       const db = new PouchDB("LocalDB");
       if (db) {
@@ -372,6 +428,42 @@ export default {
             <button @click="updateDocument(post._id)" class="update-btn">
               Edit
             </button>
+            <!-- Attachments Section -->
+            <div
+              v-if="post?._attachments && post?._attachments.length > 0"
+              class="attachments-section"
+            >
+              <h4>Attachments:</h4>
+              <div
+                v-for="attachment in post?._attachments"
+                :key="attachment.filename"
+                class="attachment-item"
+              >
+                <a
+                  :href="attachment.url"
+                  :download="attachment.filename"
+                  class="attachment-link"
+                >
+                  {{ attachment.filename }}
+                </a>
+              </div>
+            </div>
+
+            <!-- Add Attachment Form -->
+            <div class="add-attachment-section">
+              <input
+                type="file"
+                @change="handleFileUpload($event)"
+                class="file-input"
+              />
+              <button
+                @click="addAttachmentToPost(post._id)"
+                class="add-attachment-btn"
+                :disabled="!selectedFile"
+              >
+                Add Attachment
+              </button>
+            </div>
           </div>
 
           <!-- Edit mode -->
@@ -568,6 +660,38 @@ hr {
   border: none;
   border-top: 1px solid #eee;
   margin: 20px 0;
+}
+.attachments-section {
+    margin: 1rem 0;
+    padding: 1rem;
+    background-color: #f8f8f8;
+    border-radius: 4px;
+}
+
+.attachment-item {
+    display: flex;
+    align-items: center;
+    margin: 0.5rem 0;
+    padding: 0.5rem;
+    background-color: white;
+    border-radius: 4px;
+}
+
+.attachment-link {
+    flex-grow: 1;
+    color: #2196f3;
+    text-decoration: none;
+    margin-right: 1rem;
+}
+
+.delete-attachment-btn {
+    background-color: #ff4444;
+    color: white;
+    padding: 4px 8px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
 }
 </style>
 
