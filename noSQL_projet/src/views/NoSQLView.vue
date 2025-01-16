@@ -1,6 +1,8 @@
 <script lang="ts">
 import { ref } from "vue";
 import PouchDB from "pouchdb";
+import find from "pouchdb-find";
+PouchDB.plugin(find);
 
 declare interface Post {
   _id: string;
@@ -22,6 +24,11 @@ export default {
     return {
       total: 0,
       postsData: [] as PostRow[],
+      searchResults: [] as Post[],
+      searchQuery: "",
+      startDate: "",
+      endDate: "",
+      isSearchActive: false,
       document: {
         post_name: "",
         post_content: "",
@@ -34,33 +41,53 @@ export default {
     };
   },
 
-  mounted() {
-    this.initDatabase();
+  async mounted() {
+    await this.initDatabase();
+    // const db = ref(this.storage).value;
+    // if (db){
+    //   this.generePosts(db).then(() => {
     this.fetchData();
+    //   });
+    // }
   },
 
   methods: {
-    fetchData() {
+    async fetchData() {
       const storage = ref(this.storage);
       const self = this;
-      if (storage.value) {
-        storage.value
-          .allDocs({
+
+      if (!storage.value) {
+        console.warn("Database not initialized.");
+        return;
+      }
+
+      try {
+        if (this.isSearchActive) {
+          console.log(
+            "Recherche active, mise à jour des résultats de recherche."
+          );
+          const result = await storage.value.find({
+            selector: {
+              post_name: { $regex: RegExp(this.searchQuery, "i") },
+            },
+          });
+
+          this.searchResults = result.docs.map((doc: any) => ({
+            ...doc,
+          }));
+        } else {
+          const result = await storage.value.allDocs({
             include_docs: true,
             attachments: true,
-          })
-          .then(function (result: any) {
-            console.log("fetchData success", result);
-            self.postsData = result.rows.map((row: any) => {
-              return {
-                _id: row.id,
-                doc: row.doc,
-              };
-            });
-          })
-          .catch(function (error: any) {
-            console.log("fetchData error", error);
           });
+
+          this.postsData = result.rows.map((row: any) => ({
+            _id: row.id,
+            doc: row.doc,
+          }));
+        }
+      } catch (error) {
+        console.error("fetchData error:", error);
       }
     },
 
@@ -112,8 +139,8 @@ export default {
           post_name: post.post_name,
           post_content: post.post_content,
           attributes: {
-            creation_date: post.attributes.creation_date
-          }
+            creation_date: post.attributes.creation_date,
+          },
         };
 
         const response = await db.put(updatedDoc);
@@ -122,7 +149,7 @@ export default {
           this.fetchData();
         }
       } catch (err) {
-        console.log('Update error:', err);
+        console.log("Update error:", err);
       }
     },
 
@@ -137,25 +164,118 @@ export default {
           this.fetchData();
         }
       } catch (err) {
-        console.log('Delete error:', err);
+        console.log("Delete error:", err);
       }
     },
 
     cancelEdit() {
       this.editingPost = null;
     },
+    /**
+     * Fonction pour générer des posts 100 aléatoires
+     * @param db Base de donnée
+     */
+    async generePosts(db: PouchDB.Database) {
+      const categories = [
+        "Science",
+        "Art",
+        "Design",
+        "Architecture",
+        "Skate",
+        "Musique",
+        "Manga",
+        "Voyage",
+        "Sport",
+        "Cuisine",
+      ];
+      try {
+        for (let i = 0; i < 100; i++) {
+          const category =
+            categories[Math.floor(Math.random() * categories.length)];
+          const postNumber = (i + 1).toString().padStart(3, "0");
+          const content = [
+            category + " post " + postNumber,
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+            "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+            "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+            "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.",
+          ].join(" ");
+          const post = {
+            post_name: `${category}-Post-${postNumber}`,
+            post_content: content,
+            attributes: {
+              creation_date: new Date().toISOString(),
+            },
+          };
 
-    initDatabase() {
+          await db.post(post);
+          console.log(`Created post ${i + 1}/100: ${post.post_name}`);
+        }
+
+        console.log("Successfully generated 100 posts");
+        return true;
+      } catch (error) {
+        console.error("Error generating posts:", error);
+        return false;
+      }
+    },
+    async searchByName() {
+      if (!this.searchQuery.trim()) {
+        this.clearSearch();
+        return;
+      }
+
+      const db = ref(this.storage).value;
+      if (!db) return;
+
+      try {
+        const result = await db.find({
+          selector: {
+            post_name: { $regex: RegExp(this.searchQuery, "i") },
+          },
+          use_index: "post-name-index",
+        });
+        console.log("Search result:", result);
+        this.searchResults = result.docs;
+        this.isSearchActive = true;
+      } catch (error) {
+        console.error("Search error:", error);
+        this.searchResults = [];
+      }
+    },
+    clearSearch() {
+      this.searchResults = [];
+      this.searchQuery = "";
+      this.isSearchActive = false;
+    },
+    
+    async initDatabase() {
       const db = new PouchDB("LocalDB");
       if (db) {
         //http://localhost:5984/_utils/#login
-          const remoteDB = new PouchDB("http://admin:couchdb@localhost:5984/post");
-          if(remoteDB){
-            db.sync(remoteDB, {
-              live: true,
-              retry: true,
+        const remoteDB = new PouchDB(
+          "http://admin:couchdb@localhost:5984/post"
+        );
+        if (remoteDB) {
+          db.sync(remoteDB, {
+            live: true,
+            retry: true,
+          });
+
+          try {
+            // Create indexes
+            await db.createIndex({
+              index: {
+                fields: ["post_name"],
+                name: "post-name-index",
+                ddoc: "post-name-index",
+              },
             });
-          }else{
+            console.log("Created post name index");
+          } catch (error) {
+            console.error("Error creating indexes:", error);
+          }
+        } else {
           console.warn("Remote database not found");
         }
         console.log("Connected to collection 'post'");
@@ -169,92 +289,231 @@ export default {
 </script>
 
 <template>
-  <div>
-    <form @submit.prevent="createDocument">
-      <div>
-        <label for="title">Title:</label>
-        <input id="title" v-model="document.post_name" required />
-      </div>
-      <div>
-        <label for="content">Content:</label>
-        <textarea
-          id="content"
-          v-model="document.post_content"
-          required
-        ></textarea>
-      </div>
-      <button type="submit">Create Document</button>
-    </form>
-  </div>
+  <div class="container">
+    <!-- Search Section -->
+    <div class="search-section">
+      <h2 class="searchTitle">Search Posts</h2>
 
-  <div>
-    <h2>Posts</h2>
-    <div v-if="postsData.length === 0">No documents found.</div>
-    <div v-else>
-      <div v-for="post in postsData" :key="post._id" class="document-item">
-        <!-- Display mode -->
-        <div v-if="editingPost?._id !== post._id">
-          <h3>{{ post.doc.post_name }}</h3>
-          <p>{{ post.doc.post_content }}</p>
-          <p>
-            Created:
-            {{ new Date(post.doc.attributes?.creation_date).toLocaleString() }}
-          </p>
-          <button
-            @click="deleteDocument(post._id)"
-            class="delete-btn"
-          >
-            Delete
-          </button>
-          <button
-            @click="updateDocument(post._id)"
-            class="update-btn"
-          >
-            Edit
-          </button>
-        </div>
+      <!-- Search by name -->
+      <div class="search-box">
+        <input
+          v-model="searchQuery"
+          @input="searchByName"
+          placeholder="Search by post name..."
+          class="search-input"
+        />
+      </div>
 
-        <!-- Edit mode -->
-        <div v-else class="edit-form">
-          <form @submit.prevent="saveUpdate(editingPost)">
-            <div>
-              <label :for="'edit-title-' + post._id">Title:</label>
-              <input
-                :id="'edit-title-' + post._id"
-                v-model="editingPost.post_name"
-                required
-              />
-            </div>
-            <div>
-              <label :for="'edit-content-' + post._id">Content:</label>
-              <textarea
-                :id="'edit-content-' + post._id"
-                v-model="editingPost.post_content"
-                required
-              ></textarea>
-            </div>
-            <button type="submit">Save</button>
-            <button type="button" @click="cancelEdit">Cancel</button>
-          </form>
+      <button v-if="isSearchActive" @click="clearSearch" class="clear-btn">
+        Clear Search
+      </button>
+    </div>
+
+    <!-- Create Post Form -->
+    <div class="create-section">
+      <h2>Create New Post</h2>
+      <form @submit.prevent="createDocument">
+        <div>
+          <label for="title">Title:</label>
+          <input id="title" v-model="document.post_name" required />
         </div>
-        <hr />
+        <div>
+          <label for="content">Content:</label>
+          <textarea
+            id="content"
+            v-model="document.post_content"
+            required
+          ></textarea>
+        </div>
+        <button type="submit" class="create-btn">Create Document</button>
+      </form>
+    </div>
+
+    <!-- Posts Display -->
+    <div class="posts-section">
+      <h2>{{ isSearchActive ? "Search Results" : "All Posts" }}</h2>
+      <div
+        v-if="isSearchActive && searchResults.length === 0"
+        class="no-results"
+      >
+        No posts found matching your search criteria.
+      </div>
+      <div
+        v-else-if="!isSearchActive && postsData.length === 0"
+        class="no-results"
+      >
+        No documents found.
+      </div>
+      <div v-else>
+        <div
+          v-for="post in isSearchActive ? searchResults : postsData"
+          :key="post._id"
+          class="document-item"
+        >
+          <!-- Display mode -->
+          <div v-if="editingPost?._id !== post._id">
+            <h3>{{ isSearchActive ? post.post_name : post.doc.post_name }}</h3>
+            <p>
+              {{ isSearchActive ? post.post_content : post.doc.post_content }}
+            </p>
+            <p>
+              Created:
+              {{
+                new Date(
+                  isSearchActive
+                    ? post.attributes.creation_date
+                    : post.doc.attributes?.creation_date
+                ).toLocaleString()
+              }}
+            </p>
+            <button @click="deleteDocument(post._id)" class="delete-btn">
+              Delete
+            </button>
+            <button @click="updateDocument(post._id)" class="update-btn">
+              Edit
+            </button>
+          </div>
+
+          <!-- Edit mode -->
+          <div v-else class="edit-form">
+            <form @submit.prevent="saveUpdate(editingPost)">
+              <div>
+                <label :for="'edit-title-' + post._id">Title:</label>
+                <input
+                  :id="'edit-title-' + post._id"
+                  v-model="editingPost.post_name"
+                  required
+                />
+              </div>
+              <div>
+                <label :for="'edit-content-' + post._id">Content:</label>
+                <textarea
+                  :id="'edit-content-' + post._id"
+                  v-model="editingPost.post_content"
+                  required
+                ></textarea>
+              </div>
+              <button type="submit" class="save-btn">Save</button>
+              <button type="button" @click="cancelEdit" class="cancel-btn">
+                Cancel
+              </button>
+            </form>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.searchTitle {
+  color: black;
+}
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.search-section {
+  margin-bottom: 30px;
+  padding: 20px;
+  background-color: #f5f5f5;
+  border-radius: 8px;
+}
+
+.search-box {
+  margin-bottom: 20px;
+}
+
+.search-input {
+  width: 100%;
+  padding: 8px;
+  font-size: 16px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.date-range {
+  margin-top: 15px;
+}
+
+.date-inputs {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 15px;
+}
+
+.date-input {
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.search-btn {
+  background-color: #4caf50;
+  color: white;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.clear-btn {
+  background-color: #ff9800;
+  color: white;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-top: 15px;
+}
+
 .delete-btn {
   background-color: #ff4444;
   color: white;
   padding: 5px 10px;
   margin-right: 5px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
 }
 
 .update-btn {
   background-color: #44aaff;
   color: white;
   padding: 5px 10px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.create-btn {
+  background-color: #4caf50;
+  color: white;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.save-btn {
+  background-color: #4caf50;
+  color: white;
+  padding: 5px 10px;
+  margin-right: 5px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.cancel-btn {
+  background-color: #9e9e9e;
+  color: white;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
 }
 
 .edit-form {
@@ -262,7 +521,13 @@ export default {
   padding: 1rem;
   background-color: #f5f5f5;
   border-radius: 4px;
-  color:black;
+}
+
+.no-results {
+  text-align: center;
+  padding: 20px;
+  color: #666;
+  font-style: italic;
 }
 
 form div {
@@ -272,11 +537,15 @@ form div {
 label {
   display: block;
   margin-bottom: 0.5rem;
+  font-weight: bold;
 }
 
-input, textarea {
+input,
+textarea {
   width: 100%;
   padding: 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
 }
 
 button {
@@ -285,5 +554,21 @@ button {
 
 textarea {
   min-height: 100px;
+  resize: vertical;
+}
+
+.document-item {
+  margin-bottom: 20px;
+  padding: 15px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid #eee;
+  margin: 20px 0;
 }
 </style>
+
+Version 6 of 6
